@@ -1,0 +1,842 @@
+---
+title: "BDA Project work: The effect of weather on city bike usage"
+author: "Matias Ahonen, Georgy Ananov, Ida Granö"
+header-includes:
+   - \usepackage{array}
+   - \usepackage{float}
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+fig_caption: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "")
+#install.packages("ggpubr")
+library(knitr)
+library(ggplot2)
+library(rstan)
+library(ggpubr)
+library(dplyr)
+library(stringr)
+library(loo)
+library(reshape2)
+library(Metrics)
+rstan_options(auto_write = TRUE)
+
+load("CombinedData.Rda")
+combined$date <- as.Date(combined$date, format="%Y-%m-%d")
+year <- format(combined$date,format="%Y")
+combined$year <- year
+combined_trunc <- combined %>% filter(year != "2016")
+combined_trunc$group <- strtoi(combined_trunc$year) - 2016
+combined_trunc$Precipitation <- log(combined_trunc$Precipitation+0.1)
+combined$Precipitation <- log(combined$Precipitation+0.1)
+
+```
+
+# Introduction
+
+## Motivation
+
+City bikes have become a popular way of traveling in the Helsinki region over the past few years. Currently there are around 4600 bikes and 460 bike stations in use all over the city [(HSL, 2021)](https://www.hsl.fi/en/citybikes/helsinki). The city bikes provide an alternative to conventional public transportation, offering  a quick and easy way to move within the city. The system is simple: it is possible to rent share-use bikes by buying a pass for a whole season, for a week, or for a single day, for up to 30 minutes per use, or up to five hours for an additional charge. City bikes are available from April until end of October each year, and they were first introduced in year 2016. The number of bikes and bike stations has been steadily increasing over the last 5 years. \newline
+
+Unlike buses and trains, city bikes are not restricted to specific routes or schedules. This presents a number of problems for urban planners, traffic controllers and public transport engineers. The demand for city bikes varies from day to day, which necessitates that the biking infrastructure is built to function in an optimal way under drastically differing load conditions. Unexpected spikes or dips in the bike usage could also affect the operation of other public transport systems. The need to be able to predict city bike demand then is quite apparent. 
+
+## Problem description
+
+The main goal of the project explore the biking data and to come up with a method for forecasting the number of city bike trips that occur in one day. 
+
+## Main modeling idea 
+
+One factor that is very likely to affect how willing an individual is to choose a city bike as a mode of transportation for the day is the current weather conditions. People are more likely to opt for biking when the weather is favorable, while cold or rainy weather would push people to use methods of transportation that shelter them from the elements (See Figures 1-4). 
+
+```{r, echo=F, fig.height=3, fig.width=3.8, fig.cap="The number of daily bike trips against temperature in years 2016-2020."}
+ggplot(data=combined, aes(x=MeanTemp, y=n_trips)) +
+  geom_point(aes(color=year), size=0.5) +
+  xlab("temperature [C]") + ylab("trips") + labs(title="Number of trips in relation to temperature") +
+  theme_minimal()
+```
+
+In this project, we are interested in modeling how weather parameters, such as temperature, precipitation and humidity, affects the use of city bikes. 
+
+# Data description 
+
+We retrieved data on city bike usage from [kaggle.com](https://www.kaggle.com/geometrein/helsinki-city-bikes), and data on daily weather from [ilmatieteenlaitos.fi](https://en.ilmatieteenlaitos.fi/download-observations). The biking dataset includes information on every bike trip since the introduction of the city bikes in 2016 until late 2020, with 14 variables (departure time, return time, departure station, return station, distance traveled, duration, average speed, departure latitude, departure longitude, return latitude, return longitude, and air temperature). We pulled three variables form _ilmatieteenlaitos.fi_: daily mean temperature, daily precipitation, and mean daily humidity. \newline
+
+We were interested in modeling the daily use of city bikes, and therefore pre-processed the biking dataset to get daily values. We calculated the total number of trips each day based on the date in the departure time to get the total number of trips per day, and for each day, we averaged the duration, speed and distance traveled. Because the precipitation data was heavily focused on small values, we applied a log transform to even out the distribution, after adding a small value ($0.1$) to avoid the log of $0$. We then combined this data with the daily weather variables. \newline
+
+```{r}
+head(combined_trunc[c("date", "n_trips", "Precipitation", "MeanTemp", "Humidity")])
+```
+
+
+Figures 1, 2, 3 and 4 illustrate the data. As can be seen in Figure 1 and 2, year 2016, when the bikes were first introduced, is an outlier in terms of bike trip numbers, and was therefore excluded from analysis. Figure 2 shows the bike usage over time, Figure 3 shows the number of trips against the daily temperature and precipitation, and Figure 4 shows the number of daily trips against the average daily humidity. \newline 
+
+```{r, echo=F, fig.height=2.5, fig.width=4, fig.cap="The daily city bike usage in number of trips over time, from 2016 to end of 2020. The bikes are unavailable during the winter months (November until end of March). The usage of city bikes has clearly grown the first few years."}
+ggplot(data=combined) +
+  geom_point(aes(x=date, y=n_trips), size=0.3) +
+  labs(title="Number of daily trips") +
+  xlab("") + ylab("daily trips") +
+  theme_minimal()
+```
+
+
+
+```{r, echo=F, fig.height=3, fig.cap="The number of biking trips plotted against temperature over years 2017 to 2020. The color indicates the logarithm of level of precipitation, after adding a small value to avoid the logarithm of 0 (ln(precipitation+0.1)). The relationship between temperature and biking trips seems to be rouhgly linear. It seems like there are less biking trips on rainy days."}
+combined <- filter(combined, year != "2016")
+years <- sort(unique(format(combined$date,format="%Y")))
+combined$group <- strtoi(combined$year) - 2016
+
+plots <- list()
+for (i in years) {
+  plot <- combined_trunc %>% 
+    filter(year==i) %>% 
+    {
+      ggplot(., aes(x=MeanTemp, y=n_trips, color=(Precipitation))) +
+      geom_point(show.legend=T, size=0.5) +
+      xlab("temp. [C]") + ylab("trips") + labs(title=str_glue("year {i}")) +
+      guides(color = guide_colourbar(barwidth = 0.2, barheight = 5, title = "Log-transformed\nprecipitation")) + 
+      theme_minimal()
+    }
+  plots[[i]] <- plot
+} 
+big_plot <- ggarrange(plotlist=as.list(plots), common.legend = TRUE, legend="right")
+annotate_figure(big_plot, top=text_grob("Number of trips against daily mean temperature and precipitation", face="bold", size=14))
+```
+
+
+```{r, echo=F, fig.height=3, fig.cap="The number of biking trips plotted against humidity over years 2017 to 2020. The number of bike trips seems to go down with humidity."}
+
+plots <- list()
+for (i in years) {
+  plot <- combined %>% 
+    filter(year==i) %>% 
+    {
+      ggplot(., aes(x=Humidity, y=n_trips)) +
+      geom_point(show.legend=F, aes(colour = "red")) +
+      xlab("humidity [%]") + ylab("trips") + labs(title=str_glue("year {i}"))+
+      theme_minimal() 
+    }
+  plots[[i]] <- plot
+} 
+big_plot <- ggarrange(plotlist=as.list(plots))
+annotate_figure(big_plot, top=text_grob("Number of trips against daily mean humidity", face="bold", size=14))
+```
+
+
+The biking dataset has previously been used in descriptive analyses of biking behaviour (e.g., mean distance and duration, bike usage in different months, weekdays, and times of day), for analysis of popular destinations, and for network analysis. To our knowledge, a deeper exploration of the effects of weather on city bike usage has not been done before. 
+
+# Model introduction
+
+In this project, we are comparing three models of increasing complexity. First, we build a simple pooled univariate model with temperature as the predictor of the number of trips. Then, we add humidity and precipitation to the linear pooled model as covariates. Finally, as the number of bikes and bike stations have grown over the years, we build a hierarchical model for investigating the data. Below is the mathematical notations for all three models. \newline
+
+\begin{center}
+\begin{tabular}{ m{4.1cm} m{4.1cm} m{4.3cm}}
+Model 1 & Model 2: & Model 3: \\
+\end{tabular}
+\end{center}
+
+Hyper-priors: 
+
+\begin{center}
+\begin{tabular}{ m{4.1cm} m{4.1cm} m{4.3cm} }
+ &  & \(\mu_{\alpha} \sim N(1840, 1118.54)\) \\
+ &  & \(\sigma_{\alpha} \sim HalfCauchy(0,1000)\) \\
+ &  & \(\mu_\beta \sim N(-1400, 851.06)\)  \\
+ &  & \(\sigma_\beta \sim HalfCauchy(0,1000)\)  \\
+ &  & \(\mu_\gamma \sim N(-1000, 500)\) \\
+ &  & \(\sigma_\gamma \sim HalfCauchy(0,1000)\) \\
+ &  & \(\mu_\delta \sim N(0, 10000)\) \\
+ &  & \(\sigma_\delta \sim HalfCauchy(0,1000)\) \\
+\end{tabular}
+\end{center}
+
+Priors: 
+
+\begin{center}
+\begin{tabular}{ m{4.1cm} m{4.1cm} m{4.3cm} }
+\(\alpha \sim N(1840, 1118.54)\) & \(\alpha \sim N(1840, 1118.54)\) & \(\alpha \sim N(\alpha_0, \sigma_{0})\) \\
+
+& \(\beta \sim  N(-1400, 851,06)\) & \(\beta \sim N(\beta_0, \sigma_0)\)  \\
+
+& \(\gamma \sim N(-1750,1063.83)\) & \(\gamma \sim N(\gamma_0, \sigma_0)\) \\
+
+\(\delta \sim N(0,10000)\)& \(\delta \sim N(0,10000)\) & \(\delta \sim N(\delta_0, \sigma_0)\) \\
+\(\sigma \sim HalfCauchy(0,1000)\) & \(\sigma \sim HalfCauchy(0,1000)\) & \(\sigma \sim HalfCauchy(0,1000)\) \\
+\end{tabular}
+\end{center}
+
+Linear model and likelihood: 
+
+\begin{center}
+\begin{tabular}{ m{4.1cm} m{4.1cm} m{4.3cm} }
+\(\mu = \alpha * Temp+\delta\) & \(\mu = \alpha*Temp+\beta*\log(Prec+0.1) + \gamma*Hum+\delta\) & \(\mu = \alpha * Temp + \beta * log(Prec+0.1) + \gamma*Hum + \delta\) \\
+\(y \sim N(\mu, \sigma)\) & \(y \sim N(\mu, \sigma)\) & \(y \sim N(\mu, \sigma)\)\\
+\end{tabular}
+\end{center} 
+
+Below we describe the reasoning behind our choice of priors: \newline 
+
+We estimate priors for the parameters using common sense and prior research.
+
+According to HSL, during 2020 there were almost 3500 bikes in Helsinki and Espoo and  each bike was used five times per day in Helsinki and twp times per day in Espoo [(HSL, 2020)](https://www.hsl.fi/hsl/uutiset/uutinen/2020/10/kaupunkipyorilla-on-poljettu-ahkerasti-myos-pandemian-aikana). As most of the bikes are in Helsinki, we estimate that the average number of trips for a bike per day is 4. This would result in the average number of total trips being 4 * 3500 = 14 000.
+
+* $\alpha$ : We believe that a one-degree increase in temperature is unlikely to decrease the number of trips or to increase the number of trips by more than 20% (2800). We estimate the prior distribution of $alpha$ by estimating the prior probability for $alpha$ to be Pr(0 < $\alpha$ < 2800) = 0.9. This way we get the distribution of Normal(1840, 1118.54) or our prior. 
+
+* $\beta$ : It is common sense that precipitation, decreases the amount of outdoor activity so we believe that is highly unlikely that it would increase the number of trips. We also believe that a single percentage increase in rain is unlikely to decrease the number of trips by over 20%. Thus, we estimate the prior distribution of $\beta$ by calculating the prior probability so that: Pr(-2800 < $\beta$ < 0) = 0.95. The resulting prior is Normal(-1400, 851.06).
+
+* $\gamma$ : For humidity it is difficult to estimate how much a single percentage increase in relative humidity, would affect the number of trips made. Based on previous research (see f.e. Flynn, Dana,,Sears, 
+& Aultman-Hall, (2012)) we believe that the effect humidity has on number of trips is very likely to be negative. We estimate that a single percentage point increase in humidity most likely decreases the number of trips but doesn’t do it by more than 25%. We estimate the prior distribution of $\gamma$ by estimating the prior probability for $\gamma$to be: Pr(-3500 < $\gamma$ < 0) = 0.9 and get the distribution of Normal(-1750,1063.83).
+
+* $\delta$ : For the intercept term $\delta$ we don’t have prior knowledge, so we decided to go with a very weak prior of Normal(0,10 000). This way we make sure we don’t limit the how the intercept is learnt from the data.
+
+For the variance of the daily trips, we also have no prior knowledge, so we use a very weak prior of Half-Cauchy(0,1000).
+
+In the hierarchical model we use the priors estimated for parameters of the pooled model as the hyperpriors of the mean values of the parameters. For the standard deviations we estimate individual variances for each of the parameters that follow the Half-Cauchy(0,1000) distribution. We model the different years with common predictive variance, which follows a Half-Cauchy distribution(0,500)
+
+In the following section, we present and assess the three models in order. \newline 
+
+# Singe-variable pooled model
+
+## Model description
+
+Let us start with a very basic pooled linear model that predicts the daily number of trips based solely on temperature. We run the model with 4 chains, with 2000 posterior draws, out of which 1000 are used as warmup. 
+
+Below is the stan code for the model. 
+
+```{r, echo=F, comment=NA}
+writeLines(readLines("pooled_T.stan"))
+``` 
+
+
+```{r, results="hide", message=F, warning=F}
+# Preparing the data for use in stan
+stan_data <- list(
+  N = nrow(combined),
+  K = length(unique(combined$group)),
+  x = combined$group,
+  y = combined$n_trips,
+  t = combined$MeanTemp,
+  p = combined$Precipitation,
+  h = combined$Humidity
+)
+
+# Fitting the model
+fit <- stan(file="pooled_T.stan", data=stan_data, 
+            refresh=0, pars=c("alpha", "delta", "sigma", "log_lik"))
+draws <- data.frame(extract(fit))
+fit_pooled_T <- fit
+draws_pooled_T <- draws
+```
+
+## Convergence 
+
+Let us now take a look at how the four Markov chains behave to ensure that the default number of iterations is enough to reach convergence with this model (see Figure 5).
+
+```{r, echo=F, fig.height=2.5, fig.cap="A visualization of the Markov chains for alpha and delta."}
+traceplot(fit, pars=c("alpha", "delta"), ncol=1)
+```
+
+Visually the chains appear to have reached convergence. We can further confirm this by examining the $\hat{R}$ diagnostic. The diagnostic compares the within-chain and between-chain estimates of the model parameters. The more the estimates differ, the larger the $\hat{R}$ diagnostic. Generally an $\hat{R}$ value of less than $1.05$ is accepted as evidence for convergence.  
+
+```{r}
+summary_1 <- summary(fit, probs=c(0.05, 0.95), pars=c("alpha", "delta"))
+summary_1$summary
+```
+
+We can confirm that both of the $\hat{R}$ are below the recommended threshold of $1.05$, which indicates full convergence. We can also confirm a sufficiently large effective sample size for both parameters. 
+
+## Posterior predictive checks
+
+Let's check how the posterior draws of the model parameters line up against the original data (see Figure 6). 
+
+```{r, echo=F, warning=F, fig.height=2.5, fig.cap="The linear fit of the effect of mean daily temperature on the number of daily bike trips, based on the posterior draws of alpha and delta. "}
+nlines <- 30
+x_rng <- range(combined$MeanTemp) 
+x_steps <- seq(x_rng[1], x_rng[2], length.out = 100)
+x_steps <- as.matrix(x_steps)
+x_steps <- x_steps[,rep(1, times = nlines)]
+ypred <- draws$alpha[1:nlines]*t(x_steps) + draws$delta[1:nlines]
+x_steps <- t(x_steps)
+
+new_data = data.frame(ypred <- (ypred))
+rowid <- rep(1:nlines, each = 100)
+new_data <- melt(new_data) 
+new_data$rowid <- 1:nlines #rep(1:100, each = 400)  #add a rowid identifying variable
+
+plot <- combined %>%
+    ggplot(aes(x=MeanTemp, y=n_trips)) +
+      geom_point() +
+      geom_line(aes(x=x_steps, y=ypred, group=factor(rowid)), data = new_data, color = "red", alpha = 0.15) + 
+      xlab("mean daily temperature") + ylab("trips") + 
+      labs(title=str_glue("Number of trips vs temperature")) +
+      theme_minimal()
+plot
+```
+
+## Cross-validation
+
+In order to compare the efficiency of this model to other models created for this task, we can use the Pareto-Smoothed Leave-One-Out Cross Validation method. The Pareto-$k$ values are shown in Figure 7. 
+
+```{r, echo=F, message=F, warning=F,fig.height=2.5, fig.cap="The PSIS-LOO values for the pooled univariate model."}
+log_lik <- extract_log_lik(fit, merge_chains = FALSE)
+r_eff <- relative_eff(exp(log_lik), cores = 2)
+loo_1 <- loo(log_lik, r_eff = r_eff, cores = 2)
+print(str_glue("PSIS-LOO elpd for the univariate pooled model: {loo_1$elpd_loo}"))
+print(str_glue("p_loo for the univariate pooled model model: {loo_1$p_loo}"))
+plot(
+  loo_1,
+  diagnostic = c("k"),
+  label_points = FALSE,
+  main = "PSIS diagnostic plot for the univariate pooled model"
+)
+```
+
+The observed Pareto-$k$ values all fell far below the $0.7$ threshold, which indicates that the PSIS-LOO results are reliable. Once we obtain the diagnostics for the other models, we will be able to compare them and discern the most effective model. 
+
+# Multi-variable pooled model
+
+## Model description
+
+As seen in Figures 2 and 3, temperature is not the only variable to affect biking trip numbers. To improve the accuracy of the predictions, we decided to include more covariates into the list of model parameters. We are still using a linear pooled model, but this time we are basing the predictions on precipitation and humidity data in addition to the temperature observations. Again, we run the model with 4 chains, with 2000 posterior draws, out of which 1000 are used as warmup. 
+
+The code for the stan model is included below:
+
+```{r, echo=F, comment=NA}
+file <- file("pooled_TPH.stan")
+writeLines(readLines(file))
+```
+
+```{r, results="hide", message=F, warning=F}
+fit <- stan(file="pooled_TPH.stan", data=stan_data, 
+            refresh=0, pars=c("alpha","beta","gamma", "delta", "sigma", "log_lik"))
+draws <- data.frame(extract(fit))
+
+fit_pooled_TPH <- fit
+draws_pooled_TPH <- draws
+```
+
+## Convergence 
+
+Let us now take a look at how the four Markov chains behave to ensure that the default number of iterations is enough to reach convergence with this model in Figure 8.
+
+```{r, echo=F, fig.height=4, fig.cap="A visualization of the Markov chains for alpha, beta, gamma and delta."}
+traceplot(fit, pars=c("alpha","beta","gamma","delta"), ncol=1)
+```
+
+Visually the chains appear to have reached convergence. Let's take a look at the $\hat{R}$ diagnostic to confirm.
+
+```{r}
+summary_2 <- summary(fit, probs=c(0.05, 0.95), 
+                     pars=c("alpha","beta","gamma", "delta"))
+summary_2$summary
+```
+
+We can observe that all of the $\hat{R}$ values are below the recommended threshold of $1.05$, which indicates full convergence. We can also confirm a sufficiently large effective sample size for all parameters. 
+
+## Posterior predictive checks
+
+Again, let's check how the posterior draws of the model parameters line up against the original data to make sure that the model is sensible in Figures 9-11. 
+
+```{r, echo=F, warning=F, message=F,fig.height=2.5, fig.cap="The linear fit of the effect of mean daily temperature on the number of daily bike trips, based on the posterior draws of alpha, beta, gamma and delta. "}
+
+nlines <- 30
+x_rng <- range(combined$MeanTemp) 
+x_steps <- seq(x_rng[1], x_rng[2], length.out = 100)
+x_steps <- as.matrix(x_steps)
+x_steps <- x_steps[,rep(1, times = nlines)]
+ypred <- draws$alpha[1:nlines]*t(x_steps) + draws$delta[1:nlines]+draws$beta[1:nlines]*mean(combined$Precipitation)+draws$gamma[1:nlines]*mean(combined$Humidity)
+x_steps <- t(x_steps)
+
+new_data = data.frame(ypred <- (ypred))
+rowid <- rep(1:nlines, each = 100)
+new_data <- melt(new_data) 
+new_data$rowid <- 1:nlines #rep(1:100, each = 400)  #add a rowid identifying variable
+
+plot1 <- combined %>%
+    ggplot(aes(x=MeanTemp, y=n_trips)) +
+      geom_point() +
+      geom_line(aes(x=x_steps, y=ypred, group=factor(rowid)), data = new_data, color = "red", alpha = 0.15) + 
+      xlab("mean daily temperature") + ylab("trips") + 
+      labs(title=str_glue("Number of trips vs temperature")) +
+      theme_minimal()
+
+plot1
+```
+
+```{r, echo=F, warning=F, message=F,fig.height=2.5, fig.cap="The linear fit of the effect of mean daily precipitation on the number of daily bike trips, based on the posterior draws of alpha, beta, gamma and delta. "}
+
+x_rng <- range(combined$Precipitation) 
+x_steps <- seq(x_rng[1], x_rng[2], length.out = 100)
+x_steps <- as.matrix(x_steps)
+x_steps <- x_steps[,rep(1, times = nlines)]
+ypred <- draws$beta[1:nlines]*t(x_steps) + draws$delta[1:nlines]+draws$alpha[1:nlines]*mean(combined$MeanTemp)+draws$gamma[1:nlines]*mean(combined$Humidity)
+x_steps <- t(x_steps)
+
+new_data = data.frame(ypred <- (ypred))
+rowid <- rep(1:nlines, each = 100)
+new_data <- melt(new_data) 
+new_data$rowid <- 1:nlines  #add a rowid identifying variable
+
+plot2 <- combined %>%
+    ggplot(aes(x=Precipitation, y=n_trips)) +
+      geom_point() +
+      geom_line(aes(x=x_steps, y=ypred, group=factor(rowid)), data = new_data, color = "red", alpha = 0.15) + 
+      xlab("logarithm of the total daily precipitation") + ylab("trips") + 
+      labs(title=str_glue("Number of trips vs precipitation")) +
+      theme_minimal()
+
+plot2
+``` 
+
+```{r, echo=F, warning=F, message=F,fig.height=2.5, fig.cap="The linear fit of the effect of mean daily humidity on the number of daily bike trips, based on the posterior draws of alpha, beta, gamma and delta. "}
+x_rng <- range(combined$Humidity) 
+x_steps <- seq(x_rng[1], x_rng[2], length.out = 100) 
+x_steps <- as.matrix(x_steps)
+x_steps <- x_steps[,rep(1, times = nlines)]
+ypred <- draws$gamma[1:nlines]*t(x_steps) + draws$delta[1:nlines]+draws$alpha[1:nlines]*mean(combined$MeanTemp)+draws$beta[1:nlines]*mean(combined$Precipitation)
+x_steps <- t(x_steps)
+
+new_data = data.frame(ypred <- (ypred))
+rowid <- rep(1:nlines, each = 100)
+new_data <- melt(new_data) 
+new_data$rowid <- 1:nlines  #add a rowid identifying variable
+
+plot3 <- combined %>%
+    ggplot(aes(x=Humidity, y=n_trips)) +
+      geom_point() +
+      geom_line(aes(x=x_steps, y=ypred, group=factor(rowid)), data = new_data, color = "red", alpha = 0.15) + 
+      xlab("mean daily humidity") + ylab("trips") + 
+      labs(title=str_glue("Number of trips vs humidity")) +
+      theme_minimal() 
+plot3
+```
+
+## Cross-validation
+
+In order to compare the efficiency of this model to other models created for this task, we can use the Pareto-Smoothed Leave-One-Out Cross Validation method. The Pareko-$k$ values are shown in Figure 12. 
+
+```{r, echo=F, message=F, warning=F, fig.height=3, fig.cap="The Pareto-k values for the multivariate pooled model."}
+log_lik <- extract_log_lik(fit, merge_chains = FALSE)
+r_eff <- relative_eff(exp(log_lik), cores = 2)
+loo_2 <- loo(log_lik, r_eff = r_eff, cores = 2)
+print(str_glue("PSIS-LOO elpd for the multivariate pooled model: {loo_2$elpd_loo}"))
+print(str_glue("p_loo for the multivariate pooled model model: {loo_2$p_loo}"))
+plot(
+  loo_2,
+  diagnostic = c("k"),
+  label_points = FALSE,
+  main = "PSIS diagnostic plot for the multivariate pooled model"
+)
+```
+
+The observed Pareto-$k$ values all fell far below the $0.7$ threshold, which indicates that the PSIS-LOO results are reliable. 
+
+# The hierarchical model 
+
+## Model description
+
+In an attempt to further improve the quality of the predictions, we decided to deploy a hierarchical model, where the data is grouped by years. During the exploration of the data, we noticed that the datapoints in different years follow the same overall pattern, but exhibit slight variations in specific details of the pattern, which is why we felt that using a hierarchical model makes sense. We use all three weather variables to make predictions, just like with the second model.
+
+The code for the hierarchical model is as follows:
+
+```{r, echo=F, comment=NA}
+file <- file("hierarchical_TPH.stan")
+writeLines(readLines(file))
+```
+
+```{r, results="hide", message=F, warning=F}
+fit <- stan(file="hierarchical_TPH.stan", data=stan_data, iter = 2000,
+            warmup = (2000/2), refresh=0)
+draws <- data.frame(extract(fit))
+
+fit_hierarchical_TPH <- fit
+draws_hierarchical_TPH <- draws
+```
+
+## Convergence 
+
+Let us now take a look at how the four Markov chains behave to ensure that the default number of iterations is enough to reach convergence with this model. Figure 13 shows a visual convergence assessment plot for the year 2017.
+
+```{r, fig.cap="A visualization of the Markov chains for year 2017 for alpha, beta, gamma and delta."}
+year2017 <- traceplot(fit,  ncol=1,
+                   pars=c("alpha[1]", "beta[1]", "gamma[1]", "delta[1]"))
+year2017
+```
+
+Visually the chains appear to have reached convergence, however, there are parts where the chains seem to behave curiously. We can further check the convergence by examining the $\hat{R}$ diagnostic.
+
+```{r}
+summary_3 <- summary(fit, probs=c(), 
+        pars=c("alpha","beta","gamma", "delta"))
+summary_3$summary
+```
+
+All of the $\hat{R}$ are well below the recommended threshold of $1.05$, indicating that the iterations have reached convergence. We can also confirm a sufficiently large effective sample size for all parameters, although for a few parameters, the effective sample size seems smaller than for the pooled models.
+
+## Posterior predictive checks
+
+Once again, let's check how the posterior draws of the model parameters line up against the original data to make sure that the model is sensible in Figures 14-16. 
+
+```{r, echo=F,message=F, warning=F,results='hide',fig.keep='all', fig.height=2.5, fig.cap="The linear fit of the effect of mean daily temperature on the number of daily bike trips, based on the posterior draws of alpha, beta, gamma and delta. "}
+
+nlines <- 10
+x_rng <- range(combined$MeanTemp) 
+x_steps <- seq(x_rng[1], x_rng[2], length.out = 100)
+x_steps <- as.matrix(x_steps)
+x_steps <- x_steps[,rep(1, times = nlines)]
+ypred_1 <- draws$alpha.1[1:nlines]*t(x_steps) + draws$delta.1[1:nlines]+draws$beta.1[1:nlines]*mean(combined$Precipitation)+draws$gamma.1[1:nlines]*mean(combined$Humidity)
+ypred_2 <- draws$alpha.2[1:nlines]*t(x_steps) + draws$delta.2[1:nlines]+draws$beta.2[1:nlines]*mean(combined$Precipitation)+draws$gamma.2[1:nlines]*mean(combined$Humidity)
+ypred_3 <- draws$alpha.3[1:nlines]*t(x_steps) + draws$delta.3[1:nlines]+draws$beta.3[1:nlines]*mean(combined$Precipitation)+draws$gamma.3[1:nlines]*mean(combined$Humidity)
+ypred_4 <- draws$alpha.4[1:nlines]*t(x_steps) + draws$delta.4[1:nlines]+draws$beta.4[1:nlines]*mean(combined$Precipitation)+draws$gamma.4[1:nlines]*mean(combined$Humidity)
+x_steps <- t(x_steps)
+
+new_data_1 = data.frame(ypred_1 <- (ypred_1))
+rowid <- rep(1:nlines, each = 100)
+new_data_1 <- melt(new_data_1) 
+new_data_1$rowid <- 1:nlines
+
+new_data_2 = data.frame(ypred_2 <- (ypred_2))
+new_data_2 <- melt(new_data_2) 
+new_data_2$rowid <- 1:nlines
+
+new_data_3 = data.frame(ypred_3 <- (ypred_3))
+new_data_3 <- melt(new_data_3) 
+new_data_3$rowid <- 1:nlines
+
+new_data_4 = data.frame(ypred_4 <- (ypred_4))
+new_data_4 <- melt(new_data_4) 
+new_data_4$rowid <- 1:nlines
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+cols <- gg_color_hue(4)
+
+plot1 <- combined %>%
+    ggplot(aes(x=MeanTemp, y=n_trips)) +
+      geom_point(aes(color=year), alpha=0.7) +
+      geom_line(aes(x=x_steps, y=ypred_1, group=factor(rowid)), data = new_data_1, color = cols[1], alpha = 0.3) + 
+      geom_line(aes(x=x_steps, y=ypred_2, group=factor(rowid)), data = new_data_2, color = cols[2], alpha = 0.3) + 
+      geom_line(aes(x=x_steps, y=ypred_3, group=factor(rowid)), data = new_data_3, color = cols[3], alpha = 0.3) +
+      geom_line(aes(x=x_steps, y=ypred_4, group=factor(rowid)), data = new_data_4, color = cols[4], alpha = 0.3) +
+      xlab("mean daily temperature") + ylab("trips") + 
+      labs(title=str_glue("Number of trips vs temperature")) +
+      theme_minimal()
+
+plot1
+```
+
+```{r, echo=F, message=F,results='hide',fig.keep='all', warning=F, fig.height=2.5, fig.cap="The linear fit of the effect of mean daily precipitation on the number of daily bike trips, based on the posterior draws of alpha, beta, gamma and delta. "}
+
+x_rng <- range(combined$Precipitation) 
+x_steps <- seq(x_rng[1], x_rng[2], length.out = 100)
+x_steps <- as.matrix(x_steps)
+x_steps <- x_steps[,rep(1, times = nlines)]
+ypred_1 <- draws$beta.1[1:nlines]*t(x_steps) +
+  draws$delta.1[1:nlines]+draws$alpha.1[1:nlines]*mean(combined$MeanTemp)+draws$gamma.1[1:nlines]*mean(combined$Humidity)
+ypred_2 <- draws$beta.2[1:nlines]*t(x_steps) +
+  draws$delta.2[1:nlines]+draws$alpha.2[1:nlines]*mean(combined$MeanTemp)+draws$gamma.2[1:nlines]*mean(combined$Humidity)
+ypred_3 <- draws$beta.3[1:nlines]*t(x_steps) +
+  draws$delta.3[1:nlines]+draws$alpha.3[1:nlines]*mean(combined$MeanTemp)+draws$gamma.3[1:nlines]*mean(combined$Humidity)
+ypred_4 <- draws$beta.4[1:nlines]*t(x_steps) +
+  draws$delta.4[1:nlines]+draws$alpha.4[1:nlines]*mean(combined$MeanTemp)+draws$gamma.4[1:nlines]*mean(combined$Humidity)
+x_steps <- t(x_steps)
+
+new_data_1 = data.frame(ypred_1 <- (ypred_1))
+rowid <- rep(1:nlines, each = 100)
+new_data_1 <- melt(new_data_1) 
+new_data_1$rowid <- 1:nlines
+
+new_data_2 = data.frame(ypred_2 <- (ypred_2))
+new_data_2 <- melt(new_data_2) 
+new_data_2$rowid <- 1:nlines
+
+new_data_3 = data.frame(ypred_3 <- (ypred_3))
+new_data_3 <- melt(new_data_3) 
+new_data_3$rowid <- 1:nlines
+
+new_data_4 = data.frame(ypred_4 <- (ypred_4))
+new_data_4 <- melt(new_data_4) 
+new_data_4$rowid <- 1:nlines
+
+plot2 <- combined %>%
+    ggplot(aes(x=Precipitation, y=n_trips)) +
+      geom_point(aes(color=year), alpha=0.7) +
+      geom_line(aes(x=x_steps, y=ypred_1, group=factor(rowid)), data = new_data_1, color = cols[1], alpha = 0.3) + 
+      geom_line(aes(x=x_steps, y=ypred_2, group=factor(rowid)), data = new_data_2, color = cols[2], alpha = 0.3) + 
+      geom_line(aes(x=x_steps, y=ypred_3, group=factor(rowid)), data = new_data_3, color = cols[3], alpha = 0.3) +
+      geom_line(aes(x=x_steps, y=ypred_4, group=factor(rowid)), data = new_data_4, color = cols[4], alpha = 0.3) +
+      xlab("Logarithm of the total daily precipitation") + ylab("trips") + 
+      labs(title=str_glue("Number of trips vs precipitation")) +
+      theme_minimal()
+
+plot2
+``` 
+
+```{r, echo=F, message=F,results='hide',fig.keep='all',warning=F, fig.height=2.5, fig.cap="The linear fit of the effect of mean daily humidity on the number of daily bike trips, based on the posterior draws of alpha, beta, gamma and delta. "}
+x_rng <- range(combined$Humidity) 
+x_steps <- seq(x_rng[1], x_rng[2], length.out = 100) 
+x_steps <- as.matrix(x_steps)
+x_steps <- x_steps[,rep(1, times = nlines)]
+ypred_1 <- draws$gamma.1[1:nlines]*t(x_steps) +
+  draws$delta.1[1:nlines]+draws$alpha.1[1:nlines]*mean(combined$MeanTemp)+draws$beta.1[1:nlines]*mean(combined$Precipitation)
+
+ypred_2 <- draws$gamma.2[1:nlines]*t(x_steps) +
+  draws$delta.2[1:nlines]+draws$alpha.2[1:nlines]*mean(combined$MeanTemp)+draws$beta.2[1:nlines]*mean(combined$Precipitation)
+
+ypred_3 <- draws$gamma.3[1:nlines]*t(x_steps) +
+  draws$delta.3[1:nlines]+draws$alpha.3[1:nlines]*mean(combined$MeanTemp)+draws$beta.3[1:nlines]*mean(combined$Precipitation)
+
+ypred_4 <- draws$gamma.4[1:nlines]*t(x_steps) +
+  draws$delta.4[1:nlines]+draws$alpha.4[1:nlines]*mean(combined$MeanTemp)+draws$beta.4[1:nlines]*mean(combined$Precipitation)
+x_steps <- t(x_steps)
+
+new_data_1 = data.frame(ypred_1 <- (ypred_1))
+rowid <- rep(1:nlines, each = 100)
+new_data_1 <- melt(new_data_1) 
+new_data_1$rowid <- 1:nlines
+
+new_data_2 = data.frame(ypred_2 <- (ypred_2))
+new_data_2 <- melt(new_data_2) 
+new_data_2$rowid <- 1:nlines
+
+new_data_3 = data.frame(ypred_3 <- (ypred_3))
+new_data_3 <- melt(new_data_3) 
+new_data_3$rowid <- 1:nlines
+
+new_data_4 = data.frame(ypred_4 <- (ypred_4))
+new_data_4 <- melt(new_data_4) 
+new_data_4$rowid <- 1:nlines
+
+plot3 <- combined %>%
+    ggplot(aes(x=Humidity, y=n_trips)) +
+      geom_point(aes(color=year), alpha=0.7) +
+      geom_line(aes(x=x_steps, y=ypred_1, group=factor(rowid)), data = new_data_1, color = cols[1], alpha = 0.3) + 
+      geom_line(aes(x=x_steps, y=ypred_2, group=factor(rowid)), data = new_data_2, color = cols[2], alpha = 0.3) + 
+      geom_line(aes(x=x_steps, y=ypred_3, group=factor(rowid)), data = new_data_3, color = cols[3], alpha = 0.3) +
+      geom_line(aes(x=x_steps, y=ypred_4, group=factor(rowid)), data = new_data_4, color = cols[4], alpha = 0.3) +
+      xlab("mean daily humidity") + ylab("trips") + 
+      labs(title=str_glue("Number of trips vs humidity")) +
+      theme_minimal() 
+plot3
+```
+
+## Cross-validation
+
+Let's take a look at the LOO diagnostics.
+
+```{r, echo=F, message=F, warning=F, fig.cap= "Pareto-k values for the hierarchical model."}
+log_lik <- extract_log_lik(fit_hierarchical_TPH, merge_chains = FALSE)
+r_eff <- relative_eff(exp(log_lik), cores = 2)
+loo_3 <- loo(log_lik, r_eff = r_eff, cores = 2)
+print(str_glue("PSIS-LOO elpd for the multivariate hierarchical model: {loo_3$elpd_loo}"))
+print(str_glue("p_loo for the multivariate hierarchical model model: {loo_3$p_loo}"))
+plot(
+  loo_3,
+  diagnostic = c("k"),
+  label_points = FALSE,
+  main = "PSIS diagnostic plot for the multivariate hierarchical model"
+)
+```
+
+All Pareto-$k$ values are below the 0.7 threshold. 
+
+# Model comparison
+
+Now we can compare the three models. Let's do this by taking a look at the LOO-ELPD values of each model:
+
+```{r}
+loo_compare(list(loo_1,loo_2,loo_3))
+```
+
+As expected, we can see that the hierarchical model performs the best, the pooled model with three variables performs the second best and the simple univariate pooled model is the worst model of the three. 
+
+# Predictive performance assessment
+
+## Visual assessment
+
+One way to visually assess the accuracy of the model performance is to use the models to "predict" the daily trip numbers based on the already observed weather conditions. We can then compare the shapes of the predicted distributions to the actual observed trip numbers that were plotted in Figure 1.
+
+First, let's take a look at how the simple pooled model behaves.
+
+```{r, echo=F, fig.height=2.6, fig.cap="Comparison between predicted number of trips of the univariate pooled model and the actual number of trips. The predicted numbers follow the same shape as the real ones. However, the precited values sometimes fall below zero, and do not distinguish between the yearly trends. "}
+alpha <- mean(draws_pooled_T$alpha)
+delta <- mean(draws_pooled_T$delta)
+sigma <- mean(draws_pooled_T$sigma)
+n <- nrow(combined)
+mu <- alpha * combined$MeanTemp + delta
+ypred <- rnorm(n, mu, sigma)
+ypred_pooled_T <- ypred
+
+ggplot(data=combined_trunc) +
+  geom_point(aes(x=date, y=ypred, color = "predicted"), size=0.3) +
+  geom_point(aes(x=date, y=n_trips, color = "real"), size=0.3) +
+  labs(title="Predicted daily trip numbers") +
+  xlab("") + ylab("daily trips") +
+  theme_minimal()
+```
+As we can observe, the distributions shapes for years 2017-2020 roughly match the observed data, which indicates that the model is sensible. However, the between-year differences are lost with this model, which causes particularly noticeable difference between predictions and observations during year 2017.
+
+Next, we can go through with similar analysis for the advanced pooled model.
+
+```{r, echo=F, fig.height=2.6, fig.cap="Comparison between predicted number of trips of the multivariate pooled model and the actual number of trips. The predicted numbers follow the same shape as the real ones. However, the precited values do not distinguish between the yearly trends. "}
+alpha <- mean(draws_pooled_TPH$alpha)
+beta <- mean(draws_pooled_TPH$beta)
+gamma <- mean(draws_pooled_TPH$gamma)
+delta <- mean(draws_pooled_TPH$delta)
+sigma <- mean(draws_pooled_TPH$sigma)
+n <- nrow(combined)
+mu <- alpha * combined$MeanTemp + beta*combined$Precipitation + gamma*combined$Humidity + delta
+ypred <- rnorm(n, mu, sigma)
+ypred_pooled_TPH <- ypred
+
+ggplot(data=combined_trunc) +
+  geom_point(aes(x=date, y=ypred, color = "predicted"), size=0.3) +
+  geom_point(aes(x=date, y=n_trips, color = "real"), size=0.3) +
+  labs(title="Predicted daily trip numbers") +
+  xlab("") + ylab("daily trips") +
+  theme_minimal()
+```
+
+As we can observe, the distributions shapes for years 2017-2020 roughly match the observed data, which indicates that the model is sensible. However, the between-year differences are still not accounted for.
+
+Finally, let us take a look at the hierarchical model.
+
+```{r, echo=F, fig.height=2.6, fig.cap="Comparison between predicted number of trips of the hierarchical model and the actual number of trips."}
+ypred <- c()
+sigma <- mean(draws$sigma)
+for (i in 1:4) {  
+  alpha <- mean(draws_hierarchical_TPH[[str_glue("alpha.{i}")]])
+  beta <- mean(draws_hierarchical_TPH[[str_glue("beta.{i}")]])
+  gamma <- mean(draws_hierarchical_TPH[[str_glue("gamma.{i}")]])
+  delta <- mean(draws_hierarchical_TPH[[str_glue("delta.{i}")]])
+  data <- combined_trunc %>% filter(group == i)
+  mu <- alpha * data$MeanTemp + 
+        beta * data$Precipitation + 
+        gamma * data$Humidity + 
+        delta
+  n <- nrow(data)
+  ypred <- c(rnorm(n, mu, sigma), ypred)
+}
+ypred_hierarchical_TPH <- ypred
+
+ggplot(data=combined_trunc) +
+  geom_point(aes(x=date, y=ypred, color = "predicted"), size=0.3) +
+  geom_point(aes(x=date, y=n_trips, color = "real"), size=0.3) +
+  labs(title="Predicted daily trip numbers") +
+  xlab("") + ylab("daily trips") +
+  theme_minimal()
+```
+
+We can now observe that the model effectively accounts for the between-years differences in city bike usage.
+
+## Mean Absolute Error 
+
+To obtain a more concrete numerical evaluation of the model performance, we can calculate the Mean Absolute Error of the models. Let us take a look at the results:
+
+```{r, echo=F}
+reference <- combined_trunc$n_trips
+mae_pooled_T <- mae(ypred_pooled_T, reference)
+mae_pooled_TPH <- mae(ypred_pooled_TPH, reference)
+mae_hierarchical_TPH <- mae(ypred_hierarchical_TPH, reference)
+str_glue("Mean Absolute Error for the hierarchical model: {mae_hierarchical_TPH}")
+```
+
+Given that most days see more than 10,000 trips, the observed error should be acceptable in the context of predicting high-demand and low-demand days.
+
+## R Squared Diagnostic
+
+We can also evaluate how well our model explains the variance within the data. For that, we will turn to the adjusted R-squared diagnostic. 
+
+```{r, echo=F}
+draws <- draws_hierarchical_TPH
+combined_2017 <- combined %>% filter(year == "2017")
+combined_2018 <- combined %>% filter(year == "2018")
+combined_2019 <- combined %>% filter(year == "2019")
+combined_2020 <- combined %>% filter(year == "2020")
+ypred_1 <- mean(draws$alpha.1)*combined_2017$MeanTemp + mean(draws$delta.1)+mean(draws$beta.1)*combined_2017$Precipitation + mean(draws$gamma.1)*combined_2017$Humidity
+ypred_2 <- mean(draws$alpha.2)*combined_2018$MeanTemp + mean(draws$delta.2)+mean(draws$beta.2)*combined_2018$Precipitation + mean(draws$gamma.2)*combined_2018$Humidity
+ypred_3 <- mean(draws$alpha.3)*combined_2019$MeanTemp + mean(draws$delta.3)+mean(draws$beta.3)*combined_2019$Precipitation + mean(draws$gamma.3)*combined_2019$Humidity
+ypred_4 <- mean(draws$alpha.4)*combined_2020$MeanTemp + mean(draws$delta.4)+mean(draws$beta.4)*combined_2020$Precipitation + mean(draws$gamma.4)*combined_2020$Humidity
+ypred <- c(ypred_4, ypred_3, ypred_2, ypred_1)
+
+rss <- sum((ypred - combined_trunc$n_trips) ^ 2)  ## residual sum of squares
+tss <- sum((combined_trunc$n_trips - mean(combined_trunc$n_trips)) ^ 2)  ## total sum of squares
+rsq <- 1 - rss/tss
+n <- length(combined_trunc$group)
+R_adj <- 1 - (1-rsq)*(n-1)/(n-1-3)
+str_glue("Adjusted R-squared diagnostic for the hierarchical model: {R_adj}")
+```
+
+We can conclude that majority of observations fit the constructed model well.
+
+# Sensitivity analysis
+
+Our priors were based on rough estimations and different choices could easily be argued. To check whether or not our prior choices affect the results significantly, let's test some different priors. Let's do this sensitivity analysis with the hierarchical model, as it was proven to be the best performing one. 
+
+Now instead of using the priors we estimated, let's use very weakly informative hyperpriors of $\mu$ = Normal(0,10000) and $\sigma$ = Half-Cauchy(0,10000)for all of the parameters $\alpha$, $\beta$, $\gamma$ and $\delta$. For the standard deviations of the parameters we already used very vague priors, but those can be made even more vague. Let's change the prior for the common variance of the years also to Half-Cauchy(0,10000). Now the priors are very weakly informative, so practically all of the information is derived from the data. 
+
+Let's run the our hierarchical model again using these new priors, but using all the same specifications otherwise.
+
+```{r, results="hide", message=F, warning=F}
+fit_alt_prior <- stan(file="hierarchical_TPH_AltPrior.stan", data=stan_data, iter = 2000,
+            warmup = (2000/2), refresh=0)
+draws_alt_prior <- data.frame(extract(fit_alt_prior))
+```
+
+Let's then compare the obtained parameters:
+
+```{r}
+summary_alt <- summary(fit_alt_prior, probs=c(), 
+        pars=c("alpha","beta","gamma", "delta"))
+summary_3$summary
+summary_alt$summary
+```
+
+From the parameters we can see that they are extremely close to each other. This suggests that the weakly informative priors we chose were mostly overpowered by the data and didn't affect the results much at all. Using nearly flat priors produces results that are very similar to the ones we obtained when using weakly-informative priors.
+
+Let's compare the models some more:
+
+```{r}
+log_lik <- extract_log_lik(fit_alt_prior, merge_chains = FALSE)
+r_eff <- relative_eff(exp(log_lik), cores = 2)
+loo_alt <- loo(log_lik, r_eff = r_eff, cores = 2)
+
+loo_compare(list(loo_3,loo_alt))
+```
+
+From the comparison, we can see that our estimated priors only slightly overperform the very weak priors. This suggests that the model is not very sensitive to the chosen priors as long as they are not made to be too limiting.
+
+# Discussion 
+
+Like all models, our model has some issues. One of the first issue was discovered during the data collection phase. While collecting the data for the daily precipitation numbers, we noticed that FMI only reports the precipitation up to a single decimal. This inaccuracy in the data caused some binning especially at the lower ends of the precipitation amounts, which made fitting a linear model more difficult. We ended up applying a logarithmic scale to the precipitation data, which improved the accuracy of the models, but in the process we inevitably had to slightly alter the data to avoid $log(0)$ expressions.
+
+Another problem with the weather data was that we have to assume that the weather for all trips matches the weather observations collected at the FMI weather station in Kaisaniemi. The Helsinki region is a large area, where there are bound to be some differences in weather at any given moment. The decision to only use data from the Kaisaniemi weather station was made purely for practical reasons. Trying to find and match more local weather data for the trips would have been very time consuming compared to the gain it would have provided for the model. 
+
+Another difficulty we had was with choosing the priors for the different models. There have been some previous studies conducted in other cities about the effect weather has on city biking, but none of their methods matched ours, which made it difficult to use their results for the priors. Instead we ended up looking to previous research for the expected directions of the effects as those were easily transferable to our study as well. With more time we could possibly try to use some more advanced methods to get our priors to reflect the prior research more accurately.
+
+One issue also arose when we were choosing the models and especially the variables. During modeling we came up with many possible variables that could improve the predictive power of our model even further (f.e. workday vs holiday or what weekday it is). We also considered modeling different parameters of the biking dataset, such as duration and distance. However, to limit the scope of this project, we decided to stick to just weather variables and out of those to the three that we think have the largest effect, and the total trip number per day. If we were to continue this project further we would definitely look into including more variables. 
+
+We noticed that even though the hierarchical model performed best, sometimes the Markov-chains behaved slightly strangely, where they sometimes seemingly got "trapped" in a smaller range for several iterations. However, the hierarchical model is still clearly better than the pooled models. 
+
+Another observation came to our mind at the later stages of the project when we were thinking about the practical applications of the project. In the project we are using weather observations instead of weather forecasts. Since the traffic control decisions need to be made well in advance need to be based on forecasts. This means that the type of data that was used during the construction of the model (weather observations) does not exactly match the type of data that the model would be used with (weather forecast). It would be an interesting avenue of further research to see whether the results change significantly if we were to use data based on weather forecasts instead of observations.
+
+# Conclusion of the results
+
+Our results confirm that weather has a significant effect on how likely people are to use city bikes in the Helsinki region. The results suggest that most trips are made on hot days, with no rain and low relative humidity. As weather can be forecast, HSL could use this model we created to allocate resources more effectively by adjusting the their workforce to match the expected demand on city bikes.
+
+# Self reflection on learning
+
+During the project we learned especially about applying the topics of the course in practice. Even though many of the assignments have had real world examples, they have also had clear and guided answers for the questions. In the case of this project, many of the answers were not clear cut. Questions like which variables to include, what kind of a model should we build or what kind of a prior to choose are all questions that can have many justifiable answers depending on the circumstances. This project helped us think about the different choices we are making during the modeling and how do they actually affect the result.
+
+This project also taught us about conducting data analysis in a team. At the early stages the distribution of the tasks was not as efficient as it could have been and we ended up waiting for each other or working on the same issues simultaneously without collaboration. However, as the project progressed, we started to find working methods that suited us and the project started to progress at a much greater speed.
+
+# References
+
+Flynn, B. S., Dana, G. S., Sears, J., & Aultman-Hall, L. (2012). Weather factor impacts on commuting to work by bicycle. Preventive medicine, 54(2), 122-124.
